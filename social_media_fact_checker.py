@@ -3,21 +3,15 @@ import os
 import gradio as gr
 from fastapi import FastAPI
 from dotenv import load_dotenv
-from IPython.display import Markdown, display
 from openai import OpenAI
-from transformers import pipeline
 import numpy as np
 
 #Load necessary variables
 load_dotenv(override=True) # Loads variables from .env file
 api_key = os.getenv('OPENAI_API_KEY') #Gets the Open API key 
 
-#Iniitlaize speech-to-text model
-transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small")
 
-
-
-def fact_checker(user_message, constrained_results): #Main function that conducts fact-checking
+def fact_checker(user_message, selected_category): #Main function that conducts fact-checking
     
     # Check the key and return corresponding message 
     if not api_key:
@@ -30,20 +24,34 @@ def fact_checker(user_message, constrained_results): #Main function that conduct
     
     print("API key found and looks good!") #Testing message
     
-    if constrained_results==True:
-        system_prompt = """
-        You are a fact-checking assistant that analyzes the user prompt text and the site to fact-check
-        and return yes or no as a answer with a short explanation and percentage-score of credibility.
-        List the sources and links of fact sources as is. Credibility score should reflect percentage-accuracy of user-inputs.
-         Only use the following two sites: site:factcheck.org AND/OR site:who.int
-        """ #Simple prompt to tell model how to behave when user does want constrained results
+    #mapping out dropdown selection to site constraints
+    category_sites = {
+        "general": ["site:reuters.com", "site:apnews.com"],
+        "us_politics": ["site:factcheck.org", "site:politifact.com"],
+        "us_legislation": ["site:congress.gov", "site:govtrack.us"],
+        "economy_labor": ["site:bls.gov", "site:fred.stlouisfed.org"],
+        "public_health": ["site:cdc.gov", "site:who.int"],
+        "medicine": ["site:pubmed.ncbi.nlm.nih.gov", "site:medlineplus.gov"],
+        "research": ["site:arxiv.org", "site:nature.com"],
+
+    }
+    if selected_category in category_sites:
+        selected_sites = category_sites[selected_category]
+        site_filter_text = " AND/OR ".join(selected_sites)
+        system_prompt = f"""
+        You are a fact-checking assistant that analyzes the user prompt text and checks its validity.
+        Return 'yes' or 'no' with a short explanation and a percentage credibility score.
+        Only use the following two sites: {site_filter_text}
+        List the sources and links as they are.
+        Credibility score should reflect percentage accuracy of user-inputs. """
+
     else:
          system_prompt = """
-         You are a fact-checking assistant that analyzes the user prompt text and the site to fact-check
-         and return yes or no as a answer with a short explanation and percentage-score of credibility.
-         Credibility score should reflect percentage-accuracy of user-inputs.
-         List the sources and links of fact sources as is. No limitation on credible sites to use.
-         """ #Simple prompt to tell model how to behave when user does NOT want constrained results
+        You are a fact-checking assistant that analyzes the user prompt text and checks its validity.
+        Return 'yes' or 'no' with a short explanation and a percentage credibility score.
+        You may use any credible source.
+        List the sources and links as they are.
+        """ #Simple prompt to tell model how to behave when user does NOT want constrained results
 
     messages = [ # Essentially create a conversation structure for user-input vs. model 
         {"role": "system", "content": system_prompt},
@@ -56,104 +64,118 @@ def fact_checker(user_message, constrained_results): #Main function that conduct
             model="gpt-4-turbo",  
             messages=messages #Send request/message to OpenAI() instance 
         )
-        final_response = response.choices[0].message.content # Store the text response
-        return final_response
+        fact_check_result = response.choices[0].message.content.strip()
+
+        is_false = fact_check_result.lower().startswith("no") or (
+            "credibility score: " in fact_check_result.lower() and "50%" in fact_check_result.lower()
+        )
+
+        if is_false:
+            counter_prompt = f"""
+            The following claim has been determined to be false:
+            "{user_message}"
+            
+            Please write a concise, factual, and respectful counter-response that can be used to correct misinformation in a discussion.
+            Make sure it's under 280 characters and easy to copy and paste.
+            """
+            counter_response = openai.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=[
+                    {"role": "system", "content": "You generate counter-arguments for false claims."},
+                    {"role": "user", "content": counter_prompt}
+                ]
+            )
+            counter_text = counter_response.choices[0].message.content.strip()
+
+            return f"🧠 **Fact Check Result:**\n{fact_check_result}", counter_text
+        else:
+            return f"🧠 **Fact Check Result:**\n{fact_check_result}", ""
     except Exception as e:
-        return f"❌ Error: {str(e)}" # If any error occurs in the try block, return error message as string
+        return f"❌ Error: {str(e)}", "", True #Return error message, empty counter-argument, and True to indicate error
 
-def check_claim(claim, include_sites):
-    #If claim is empty or whitespace, return warning
+def check_claim(claim, selected_category):
     if not claim.strip():
-        return "⚠️ Please enter a claim to fact-check."
+        return "⚠️ Please enter a claim to fact-check.", ""
     
-    # Add site restrictions if checkbox is selected
-    if include_sites: #If user checked the checkbox
-        constrained_results= True #constrained_results 'True' means: sysytem prompt limited to check sites: site:factcheck.org OR site:who.int
-    else:
-        constrained_results=False #constrained_results 'False' means: system prompt is NOT limtied specific sites 
-    
-    return fact_checker(claim, constrained_results) #Call fact_checker with the query and constrained_result boolean variable
+    print(f"Checking claim: {claim} | Category: {selected_category}")
+    result, counter = fact_checker(claim, selected_category)
+    print(f"Fact-check result: {result}")
+    return result, counter
 
 
-
-
-#Speech-to-text translation 
-#Code from Gradio
-def transcribe_audio(audio):
-    if audio is None:
-        return ""
-    sr, y = audio
-    if y.ndim > 1:
-        y = y.mean(axis=1)
-    y = y.astype(np.float32)
-    y /= np.max(np.abs(y))
-    return transcriber({"sampling_rate": sr, "raw": y})["text"]
-
-
-#Fact Checking the transcribed speech:
-# Fact-check the transcribed speech
-def fact_check_transcribed(text, include_sites=True):
-    if not text.strip():
-        return "⚠️ No speech detected to fact-check."
-    return check_claim(text, include_sites)
-
-
-# Create Gradio Interface
 with gr.Blocks(title="Fact Checker AI", theme=gr.themes.Soft()) as demo:
-
     gr.Markdown(
         """
         # 🔍 Fact Checker AI
         ### Verify claims and statements with AI-powered fact-checking
-        Choose either text input or audio recording to check claims.
         """
     )
 
-    # Row for the two buttons
     with gr.Row():
-        text_tab_btn = gr.Button("💬 Text Input Only")
-        audio_tab_btn = gr.Button("🎤 Audio Recording Only")
+        # Left side: Input section (1/3 width)
+        with gr.Column(scale=1):
+             claim_input = gr.Textbox(
+                 label="Enter Claim to Fact-Check",
+                 placeholder="Example: Vaccines cause autism",
+                 lines=3
+             )
 
-    # Text input section (hidden initially)
-    with gr.Row(visible=False) as text_section:
+             category_dropdown = gr.Dropdown(
+                 label="Select Category",
+                 choices=[
+                     "General Claim",
+                     "U.S. Politics",
+                     "U.S. Legislation",
+                     "Economy & Labor",
+                     "Public Health",
+                     "Medicine",
+                     "Research"
+                 ],
+                 value="General Claim"
+             )
+
+             # Examples directly under claim input
+             gr.Examples(
+                 examples=[
+                     ["Vaccines cause autism", "Medicine"],
+                     ["The Earth is flat", "General Claim"],
+                     ["Coffee is bad for your health", "Public Health"],
+                     ["5G networks spread COVID-19", "Public Health"],
+                 ],
+                 inputs=[claim_input, category_dropdown],
+                 label="🧪 Try an Example"
+             )
+
+             with gr.Row():
+                 submit_btn = gr.Button("🔍 Check Fact", variant="primary", scale=2)
+                 clear_btn = gr.Button("🗑️ Clear", scale=1)
+
+        # Right side: Output section (2/3 width)
         with gr.Column(scale=2):
-            claim_input = gr.Textbox(label="Enter Claim to Fact-Check", placeholder="Example: Vaccines cause autism", lines=3)
-            site_checkbox = gr.Checkbox(label="Search only trusted sources (factcheck.org, who.int)", value=True)
-            with gr.Row():
-                submit_btn = gr.Button("🔍 Check Fact", variant="primary", scale=2)
-                clear_btn = gr.Button("🗑️ Clear", scale=1)
-        output = gr.Markdown(label="Fact-Check Result", value="Results will appear here...")
-        # Examples
-        gr.Examples(
-            examples=[
-                ["Vaccines cause autism", True],
-                ["The Earth is flat", True],
-                ["Coffee is bad for your health", True],
-                ["5G networks spread COVID-19", True],
-            ],
-            inputs=[claim_input, site_checkbox],
-            label="Click any example to try it"
+            output = gr.Markdown(
+                label="Fact-Check Result",
+                value="Results will appear here..."
+            )
+
+            counter_box = gr.Textbox(
+                label="Suggested Counter-Argument",
+                lines=3,
+                visible=True,
+                value=""
+            )
+
+    # Text fact-check logic
+    def check_and_display(claim, selected_category):
+        result_text, counter_argument = check_claim(claim, selected_category)
+        return (
+            result_text,
+            gr.update(value=counter_argument, visible=True)
         )
 
-    # Audio input section (hidden initially)
-    with gr.Row(visible=False) as audio_section:
-        audio_input = gr.Audio(label="Speak Here", type="numpy")
-        transcribed_text = gr.Textbox(label="Transcribed Text", placeholder="Your speech will appear here...")
-        check_speech_btn = gr.Button("🔍 Fact-Check Speech")
-        fact_output_transcribed = gr.Markdown(label="Fact-Check Result")
-
-    # Button events to toggle sections
-    text_tab_btn.click(lambda: (gr.update(visible=True), gr.update(visible=False)), outputs=[text_section, audio_section])
-    audio_tab_btn.click(lambda: (gr.update(visible=False), gr.update(visible=True)), outputs=[text_section, audio_section])
-
     # Text events
-    submit_btn.click(fn=check_claim, inputs=[claim_input, site_checkbox], outputs=output)
+    submit_btn.click(fn=check_claim, inputs=[claim_input, category_dropdown], outputs=[output, counter_box])
     clear_btn.click(fn=lambda: ("", "Results will appear here..."), outputs=[claim_input, output])
-    claim_input.submit(fn=check_claim, inputs=[claim_input, site_checkbox], outputs=output)
-
-    # Audio events
-    audio_input.change(fn=transcribe_audio, inputs=[audio_input], outputs=[transcribed_text])
-    check_speech_btn.click(fn=fact_check_transcribed, inputs=[transcribed_text, site_checkbox], outputs=[fact_output_transcribed])
+    claim_input.submit(fn=check_claim, inputs=[claim_input, category_dropdown], outputs=[output, counter_box])
 
 
 def main():
@@ -161,7 +183,7 @@ def main():
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share= True  
+        share=True  
     )
 
 if __name__ == "__main__":
