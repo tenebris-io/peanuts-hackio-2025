@@ -1,0 +1,18 @@
+# Minimal requirements for social_media_fact_checker.py
+# Windows-compatible installation
+#
+# IMPORTANT: Install PyTorch FIRST with this command:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+# Then install these requirements:
+# pip install -r requirements-minimal.txt
+
+# Core dependencies
+python-dotenv
+numpy
+openai
+gradio
+transformers
+
+# Note: torch and torchaudio must be installed separately on Windows
+# See installation command above
